@@ -6,7 +6,7 @@ Example::
     # -> 'enwiki'
 """
 
-from toolforge import fetch_sitematrix
+from toolforge import _fetch_sitematrix
 
 # These elements must be combined with the language
 # e.g. en.z -> enwiki
@@ -46,7 +46,7 @@ def database_from_project_name(project_name:str) -> str:
     https://wikitech.wikimedia.org/wiki/Help:Toolforge/Database#Naming_conventions 
     and https://quarry.wmflabs.org/query/4031
     suitable for use with toolforge.connect()"""
-    
+    global _databases
     if _databases is None:
         _databases = set(_sitematrix_database_names(_fetch_sitematrix()['sitematrix']))
     
@@ -67,7 +67,7 @@ def database_from_project_name(project_name:str) -> str:
             result = _special_map[prefix]
         else:
             site = labels[1] if len(labels) > 1 else 'z'
-            if site in suffix_map:
+            if site in _suffix_map:
                 result = prefix + _suffix_map[site]
                 # Could return prefix as language
 
@@ -80,7 +80,9 @@ def _sitematrix_database_names(data):
     for k,v in data.items():
         if k.isdigit():
             for site in v['site']:
-                yield site['dbname']
+                if 'private' not in site:
+                    yield site['dbname']
         elif k == 'specials':
             for site in v:
-                yield site['dbname']
+                if 'private' not in site:
+                    yield site['dbname']

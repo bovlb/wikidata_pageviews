@@ -8,18 +8,24 @@ import gzip
 #from collections import defaultdict, Counter
 from typing import NamedTuple
 import os
+import re
+import sys
 from textwrap import dedent
 import logging
 import itertools
 import io
 import time
-import logger
+import logging
 import argparse
-from pathinfo import Path
+from pathlib import Path
+from .util import *
+from .project import database_from_project_name
+import pickle
 
 import toolforge
 
 DEFAULT_DATABASE = 's53865__wdpv_p'
+PICKLE_FILE = '/tmp/wdpv.pickle'
 
 def connect_to_database(dbname, **kargs):
     """Convenience wrapper for ``toolforge.connect`` that handles credentials.
@@ -35,9 +41,9 @@ def connect_to_database(dbname, **kargs):
         conn: Connection
     """
     conn = toolforge.connect(dbname, 
-                             host=os.environ['MYSQL_HOST'],
-                             user=os.environ['MYSQL_USERNAME'],
-                             password=os.environ['MYSQL_PASSWORD'],
+                             #host=os.environ['MYSQL_HOST'],
+                             #user=os.environ['MYSQL_USERNAME'],
+                             #password=os.environ['MYSQL_PASSWORD'],
                             **kargs)
     return conn
     
@@ -165,6 +171,11 @@ def process_log_entries(log_entries):
     logger = logging.getLogger(__name__)
     for dbname, log_entries in chunk_and_partition(log_entries, key=lambda le: le.dbname(), 
                                                    max_buckets=3, chunk_size=10000):
+        if dbname is None:
+            views = [le.views for le in log_entries]
+            unconverted_titles += len(views)
+            unconverted_views += sum(views)
+            continue
         titles = (le.title for le in log_entries)
         if dbname == 'wikidatawiki':
             qids = [ title if title.startswith("Q") else None for title in titles ]
@@ -188,9 +199,55 @@ def file_hour(file):
     https://mariadb.com/kb/en/library/date-and-time-literals/
     """
     hour_re = re.compile(r'\b(\d\d\d\d)(\d\d)(\d\d)-(\d\d)0000\b')
-    m = hour_re.search(file)
+    m = hour_re.search(str(file))
     assert m is not None, "Trying to process a file that doesn't contain an hour: " + file
     return f"{m.group(1)}-{m.group(2)}-{m.group(3)}T{m.group(4)}:00:00"        
+
+
+def write_to_database(database, qid_views, start_time, filename):
+    """Write results to database
+
+    Args:
+        database: Name of database
+        qid_views: Iterable of QID (e.g. Q42) and view count pairs
+            Each qid should appear at most once
+        hour: YYYY-MM-DDTHH:0000 formatted hour
+        start_time: time.time() object from start of run
+        filename: Name of log file processed
+    """
+    logger = logging.getLogger(__name__)
+    hour = file_hour(filename)
+    data = [ (int(qid[1:]), hour, views) 
+        for qid ,views in qid_views]
+    n_qids = len(data)
+    max_qid = max(x[0] for x in data)
+    views = sum(x[2] for x in data)
+    # https://stackoverflow.com/a/13154531
+    with connect_to_database(database, cluster="tools",
+                             local_infile = 1) as cursor:
+        batch_insert(cursor, 'qid_hourly_views', data)
+        duration = time.time() - start_time
+        sql = dedent(f"""
+            INSERT INTO hours
+            SET file = {cursor.connection.escape(filename)},
+                hour = {cursor.connection.escape(hour)}, 
+                duration = {duration}, 
+                views = {views}, 
+                max_qid = {max_qid}, 
+                n_qids = {n_qids}
+        """)
+        logger.info(sql)
+        cursor.execute(sql)
+
+def check_for_existing(database, filename):
+    with connect_to_database(database, cluster="tools",
+                             local_infile = 1) as cursor:
+        sql = dedent(f"""
+            SELECT 1 FROM hours 
+                WHERE file = {cursor.connection.escape(filename)}
+	""")
+        cursor.execute(sql)
+        assert cursor.rowcount == 0, f"File {filename} already has a record"
 
 
 def process_file(file, database=DEFAULT_DATABASE):
@@ -201,31 +258,19 @@ def process_file(file, database=DEFAULT_DATABASE):
         database: Name of database to store results in
     """
     logger = logging.getLogger(__name__)
-    hour = file_hour(file)
-    logger.info(f"Starting to process file {file} ({hour})")
-    
+    logger.info(f"Starting to process file {file}")
+    check_for_existing(database, file.name)
     start_time = time.time()
     log_entries = read_log(file)
-    processed_log_entries = process_log_entries(log_entries)
-    data = [ (int(qid[1:]), hour, views) for qid,views in processed_log_entries]
-    n_qids = len(data)
-    max_qid = max(x[0] for x in data)
-    views = sum(x[2] for x in data)
-    with connect_to_database(database) as cursor:
-        batch_insert(cursor, 'qid_hourly_views')
-        duration = time.time() - start_time
-        sql = dedent(f"""
-            INSERT INTO hours
-            SET file = {cursor.connection.escape(file)},
-                hour = {cursor.connection.escape(hour)}, 
-                duration = {duration}, 
-                views = {views}, 
-                max_qid = {max_qid}, 
-                n_qids = {n_qids}
-        """)
-        logger.info(sql)
-        cursor.execute(sql)
-        
+    if True:
+        qid_views = process_log_entries(log_entries)
+        qid_views = sum_values(qid_views)
+        with open(PICKLE_FILE, 'wb') as f:
+            pickle.dump(qid_views, f)
+    else:
+        with open(PICKLE_FILE, 'rb') as f:
+            qid_views = pickle.load(f)
+    write_to_database(database, qid_views.items(), start_time, file.name)     
 
 def main(argv=None):
     if argv is None:
@@ -240,5 +285,5 @@ def main(argv=None):
     log_level = logging.DEBUG if args.debug else logging.INFO if args.verbose else logging.WARNING
     logger.setLevel(log_level)
     logger.info(args)
-    for file in arg.files:
-        process_file(file, database)
+    for file in args.files:
+        process_file(file, args.database)
