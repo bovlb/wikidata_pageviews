@@ -8,4 +8,10 @@ setup(name='wikidata_pageviews',
       author_email='31326650+bovlb@users.noreply.github.com',
       license='',
       packages=['wikidata_pageviews'],
-      zip_safe=False)
+      zip_safe=False,
+      entry_points = {
+          'console_scripts': [
+              'wdpv-process-file=wikidata_pageviews.process_log:main'
+          ],
+      }
+)
