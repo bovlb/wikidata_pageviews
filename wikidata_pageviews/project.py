@@ -84,3 +84,15 @@ def _sitematrix_database_names(data):
         elif k == 'specials':
             for site in v:
                 yield site['dbname']
+                
+def dbinfo(data):
+    results = dict()
+    for k,v in data.items():
+        if k.isdigit():
+            for site in v['site']:
+                results[site['dbname']] = site
+        elif k == 'specials':
+            for site in v:
+                results[site['dbname']] = site
+    return results
+    
