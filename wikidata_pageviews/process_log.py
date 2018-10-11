@@ -21,6 +21,7 @@ from pathlib import Path
 from .util import *
 from .project import database_from_project_name
 import pickle
+from tenacity import retry, wait_random_exponential
 
 import toolforge
 
@@ -68,6 +69,7 @@ def convert_titles_to_qids(dbname, titles):
         """Returns SQL list of strings, appropriately escaped"""
         return "(" + ", ".join(cursor.connection.escape(s) for s in ss) + ")"
     
+    @retry(wait=wait_random_exponential(max=300))
     def get_results(cursor, sql):
         """Given some sql for ``title`` and ``qid``,
         execute and add to ``results``.
@@ -86,9 +88,10 @@ def convert_titles_to_qids(dbname, titles):
         for title, qid in cursor:
             title = title.decode()
             # I don't know why, but there's a handful of items that have a lower-case "q".  Probably historical.
-            qid = qid.decode().upper()
+            # To reduce memory overhead, we convert QIDs into integers.
+            qid = int(qid.decode().upper()[1:])
             if title not in titles:
-                logger.error(f"Unexpected title {title} for QID {qid}")
+                logger.error(f"Unexpected title {title} for QID Q{qid}")
             results[title] = qid
             n_results += 1
         return n_results
@@ -178,7 +181,8 @@ def process_log_entries(log_entries):
             continue
         titles = (le.title for le in log_entries)
         if dbname == 'wikidatawiki':
-            qids = [ title if title.startswith("Q") else None for title in titles ]
+            qids = [ int(title[1:]) 
+                       if title.startswith("Q") else None for title in titles ]
             logger.info(f"Wikidata special case: {len(log_entries)} converted to {sum(qid is not None for qid in qids)}")
         else:
             qids = convert_titles_to_qids(dbname, titles)
@@ -190,7 +194,7 @@ def process_log_entries(log_entries):
                 unconverted_titles += 1
                 unconverted_views += le.views
     logger.warning(f"Failed to convert {unconverted_titles} titles representing {unconverted_views} views")
-    yield ("Q0", unconverted_views) # File these under a fake id so they're in our total
+    yield (0, unconverted_views) # File these under a fake id so they're in our total
     
     
 def file_hour(file):
@@ -217,8 +221,7 @@ def write_to_database(database, qid_views, start_time, filename):
     """
     logger = logging.getLogger(__name__)
     hour = file_hour(filename)
-    data = [ (int(qid[1:]), hour, views) 
-        for qid ,views in qid_views]
+    data = [ (qid, hour, views) for qid ,views in qid_views]
     n_qids = len(data)
     max_qid = max(x[0] for x in data)
     views = sum(x[2] for x in data)
@@ -240,6 +243,7 @@ def write_to_database(database, qid_views, start_time, filename):
         cursor.execute(sql)
 
 def check_for_existing(database, filename):
+    """Returns true iff there is alreadys a record for this filename."""
     with connect_to_database(database, cluster="tools",
                              local_infile = 1) as cursor:
         sql = dedent(f"""
@@ -247,7 +251,7 @@ def check_for_existing(database, filename):
                 WHERE file = {cursor.connection.escape(filename)}
 	""")
         cursor.execute(sql)
-        assert cursor.rowcount == 0, f"File {filename} already has a record"
+        return cursor.rowcount != 0
 
 
 def process_file(file, database=DEFAULT_DATABASE):
@@ -256,10 +260,14 @@ def process_file(file, database=DEFAULT_DATABASE):
     Args:
         file: Path to hourly log file
         database: Name of database to store results in
+    Return:
+        status: True if file processed
     """
     logger = logging.getLogger(__name__)
     logger.info(f"Starting to process file {file}")
-    check_for_existing(database, file.name)
+    if check_for_existing(database, file.name):
+        logger.warning(f"Record already exists for file {file}")
+        return False
     start_time = time.time()
     log_entries = read_log(file)
     if True:
@@ -271,6 +279,7 @@ def process_file(file, database=DEFAULT_DATABASE):
         with open(PICKLE_FILE, 'rb') as f:
             qid_views = pickle.load(f)
     write_to_database(database, qid_views.items(), start_time, file.name)     
+    return True
 
 def main(argv=None):
     if argv is None:
@@ -280,10 +289,16 @@ def main(argv=None):
     parser.add_argument('-d', '--debug', help='Increases log level to DEBUG')    
     parser.add_argument('files', type=Path, nargs='+', metavar='file')
     parser.add_argument('--database', '--db', help='database name', default=DEFAULT_DATABASE)
+    parser.add_argument("-n", "--max-files", type=int, default=10,
+                        help="Maximum number of files to process")
     logger = logging.getLogger(__name__)
     args = parser.parse_args(argv)
     log_level = logging.DEBUG if args.debug else logging.INFO if args.verbose else logging.WARNING
     logger.setLevel(log_level)
     logger.info(args)
+    count = 0
     for file in args.files:
-        process_file(file, args.database)
+        if process_file(file, args.database):
+            count += 1
+            if count >= args.max_files:
+                break
