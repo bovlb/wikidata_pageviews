@@ -2,12 +2,14 @@
 Various generic functions that we require.
 """
 
-from typing import Iterator, Generator, Tuple
+from typing import Iterable, Generator, Tuple, Optional
 import itertools
 import tempfile
 from textwrap import dedent
+from collections import defaultdict
 
-def chunk_and_partition(items, key, chunk_size=None, max_unprocessed=None, max_buckets=None):
+def chunk_and_partition(items, key, chunk_size=None, max_unprocessed=None, 
+                        max_buckets=None):
     """Partitions items and processes in chunks
     
     Suppose you have an iterable of items that you want to process in chunks, 
@@ -103,7 +105,7 @@ def chunks(iterable:Iterable, size:int=10) -> Generator[Generator, None, None]:
 
         
 def sum_values(kvs:Iterable[Tuple[str, int]]):
-	"""Takes pairs of key and number and returns the the sum by key.
+    """Takes pairs of key and number and returns the the sum by key.
     
     Args:
         kvs: An iterable of key/number pairs
@@ -111,17 +113,18 @@ def sum_values(kvs:Iterable[Tuple[str, int]]):
     Returns:
         Dictionary from keys to totals
     """
-	results = dict()
-	for k, v in kvs:
+    results = dict()
+    for k, v in kvs:
         if k in results:
             results[k] += v
         else:
-            results[k] = k
+            results[k] = v
     return results
 
-def batch_insert(cursor, table:str, data: Iterable[Iterable], columns: Optional[Iterable[str]]=None,
-                replace=False, ignore=False, low_priority=False, concurrent=False,
-                low_priority=False, concurrent=False):
+def batch_insert(cursor, table:str, data: Iterable[Iterable], 
+                 columns: Optional[Iterable[str]]=None,
+                 replace=False, ignore=False,
+                 low_priority=False, concurrent=False):
     """Performs efficient insertion into a toolforge (MariaDB) database.
     
     Current implementation uses ``LOAD DATA INFILE`` following the advice of
@@ -146,21 +149,22 @@ def batch_insert(cursor, table:str, data: Iterable[Iterable], columns: Optional[
         result: Result of cursor execution, hopefully a number of rows
     """
     assert not replace or not ignore, "Cannot specify both replace and ignore"
-    assert not low_priory or not concurrent, "Cannot specify both low priority and concurrent"
+    assert not low_priority or not concurrent, "Cannot specify both low priority and concurrent"
     # We're using the default TSV layout using tabs and newlines, but with a backslash escape character.
     escape_table = str.maketrans({"\\": "\\\\", "\t": "\\\t", "\n": "\\\n"})
     file = tempfile.NamedTemporaryFile()
-    with open(file, 'w') as f:
+    with open(file.name, 'w') as f:
         for row in data:
-            escaped_row = (x.translate(escape_table) for x in row)
+            escaped_row = (x.translate(escape_table) 
+                           if type(x) == str else str(x)
+                           for x in row)
             print("\t".join(escaped_row), file=f)
     
     replace_or_ignore = "REPLACE" if replace else "IGNORE" if ignore else ""
     priority = "LOW PRIORITY" if low_priority else "CONCURRENT" if concurrent else ""
-    character_set 
     columns = "(" + ", ".join(columns) + ")" if columns is not None else ""
     sql = dedent(f"""
-        LOAD DATA {priority} LOCAL INFILE '{file}'
+        LOAD DATA {priority} LOCAL INFILE '{file.name}'
             {replace_or_ignore}
             INTO TABLE {table}
             FIELDS ESCAPED BY '\\\\'

@@ -8,18 +8,25 @@ import gzip
 #from collections import defaultdict, Counter
 from typing import NamedTuple
 import os
+import re
+import sys
 from textwrap import dedent
 import logging
 import itertools
 import io
 import time
-import logger
+import logging
 import argparse
-from pathinfo import Path
+from pathlib import Path
+from .util import *
+from .project import database_from_project_name
+import pickle
+from tenacity import retry, wait_random_exponential
 
 import toolforge
 
 DEFAULT_DATABASE = 's53865__wdpv_p'
+PICKLE_FILE = '/tmp/wdpv.pickle'
 
 def connect_to_database(dbname, **kargs):
     """Convenience wrapper for ``toolforge.connect`` that handles credentials.
@@ -35,9 +42,9 @@ def connect_to_database(dbname, **kargs):
         conn: Connection
     """
     conn = toolforge.connect(dbname, 
-                             host=os.environ['MYSQL_HOST'],
-                             user=os.environ['MYSQL_USERNAME'],
-                             password=os.environ['MYSQL_PASSWORD'],
+                             #host=os.environ['MYSQL_HOST'],
+                             #user=os.environ['MYSQL_USERNAME'],
+                             #password=os.environ['MYSQL_PASSWORD'],
                             **kargs)
     return conn
     
@@ -62,6 +69,7 @@ def convert_titles_to_qids(dbname, titles):
         """Returns SQL list of strings, appropriately escaped"""
         return "(" + ", ".join(cursor.connection.escape(s) for s in ss) + ")"
     
+    @retry(wait=wait_random_exponential(max=300))
     def get_results(cursor, sql):
         """Given some sql for ``title`` and ``qid``,
         execute and add to ``results``.
@@ -80,9 +88,10 @@ def convert_titles_to_qids(dbname, titles):
         for title, qid in cursor:
             title = title.decode()
             # I don't know why, but there's a handful of items that have a lower-case "q".  Probably historical.
-            qid = qid.decode().upper()
+            # To reduce memory overhead, we convert QIDs into integers.
+            qid = int(qid.decode().upper()[1:])
             if title not in titles:
-                logger.error(f"Unexpected title {title} for QID {qid}")
+                logger.error(f"Unexpected title {title} for QID Q{qid}")
             results[title] = qid
             n_results += 1
         return n_results
@@ -165,9 +174,15 @@ def process_log_entries(log_entries):
     logger = logging.getLogger(__name__)
     for dbname, log_entries in chunk_and_partition(log_entries, key=lambda le: le.dbname(), 
                                                    max_buckets=3, chunk_size=10000):
+        if dbname is None:
+            views = [le.views for le in log_entries]
+            unconverted_titles += len(views)
+            unconverted_views += sum(views)
+            continue
         titles = (le.title for le in log_entries)
         if dbname == 'wikidatawiki':
-            qids = [ title if title.startswith("Q") else None for title in titles ]
+            qids = [ int(title[1:]) 
+                       if title.startswith("Q") else None for title in titles ]
             logger.info(f"Wikidata special case: {len(log_entries)} converted to {sum(qid is not None for qid in qids)}")
         else:
             qids = convert_titles_to_qids(dbname, titles)
@@ -179,7 +194,7 @@ def process_log_entries(log_entries):
                 unconverted_titles += 1
                 unconverted_views += le.views
     logger.warning(f"Failed to convert {unconverted_titles} titles representing {unconverted_views} views")
-    yield ("Q0", unconverted_views) # File these under a fake id so they're in our total
+    yield (0, unconverted_views) # File these under a fake id so they're in our total
     
     
 def file_hour(file):
@@ -188,35 +203,36 @@ def file_hour(file):
     https://mariadb.com/kb/en/library/date-and-time-literals/
     """
     hour_re = re.compile(r'\b(\d\d\d\d)(\d\d)(\d\d)-(\d\d)0000\b')
-    m = hour_re.search(file)
+    m = hour_re.search(str(file))
     assert m is not None, "Trying to process a file that doesn't contain an hour: " + file
     return f"{m.group(1)}-{m.group(2)}-{m.group(3)}T{m.group(4)}:00:00"        
 
 
-def process_file(file, database=DEFAULT_DATABASE):
-    """Do complete job of reading log file and storing in database.
-    
+def write_to_database(database, qid_views, start_time, filename):
+    """Write results to database
+
     Args:
-        file: Path to hourly log file
-        database: Name of database to store results in
+        database: Name of database
+        qid_views: Iterable of QID (e.g. Q42) and view count pairs
+            Each qid should appear at most once
+        hour: YYYY-MM-DDTHH:0000 formatted hour
+        start_time: time.time() object from start of run
+        filename: Name of log file processed
     """
     logger = logging.getLogger(__name__)
-    hour = file_hour(file)
-    logger.info(f"Starting to process file {file} ({hour})")
-    
-    start_time = time.time()
-    log_entries = read_log(file)
-    processed_log_entries = process_log_entries(log_entries)
-    data = [ (int(qid[1:]), hour, views) for qid,views in processed_log_entries]
+    hour = file_hour(filename)
+    data = [ (qid, hour, views) for qid ,views in qid_views]
     n_qids = len(data)
     max_qid = max(x[0] for x in data)
     views = sum(x[2] for x in data)
-    with connect_to_database(database) as cursor:
-        batch_insert(cursor, 'qid_hourly_views')
+    # https://stackoverflow.com/a/13154531
+    with connect_to_database(database, cluster="tools",
+                             local_infile = 1) as cursor:
+        batch_insert(cursor, 'qid_hourly_views', data)
         duration = time.time() - start_time
         sql = dedent(f"""
             INSERT INTO hours
-            SET file = {cursor.connection.escape(file)},
+            SET file = {cursor.connection.escape(filename)},
                 hour = {cursor.connection.escape(hour)}, 
                 duration = {duration}, 
                 views = {views}, 
@@ -225,7 +241,45 @@ def process_file(file, database=DEFAULT_DATABASE):
         """)
         logger.info(sql)
         cursor.execute(sql)
-        
+
+def check_for_existing(database, filename):
+    """Returns true iff there is alreadys a record for this filename."""
+    with connect_to_database(database, cluster="tools",
+                             local_infile = 1) as cursor:
+        sql = dedent(f"""
+            SELECT 1 FROM hours 
+                WHERE file = {cursor.connection.escape(filename)}
+	""")
+        cursor.execute(sql)
+        return cursor.rowcount != 0
+
+
+def process_file(file, database=DEFAULT_DATABASE):
+    """Do complete job of reading log file and storing in database.
+    
+    Args:
+        file: Path to hourly log file
+        database: Name of database to store results in
+    Return:
+        status: True if file processed
+    """
+    logger = logging.getLogger(__name__)
+    logger.info(f"Starting to process file {file}")
+    if check_for_existing(database, file.name):
+        logger.warning(f"Record already exists for file {file}")
+        return False
+    start_time = time.time()
+    log_entries = read_log(file)
+    if True:
+        qid_views = process_log_entries(log_entries)
+        qid_views = sum_values(qid_views)
+        with open(PICKLE_FILE, 'wb') as f:
+            pickle.dump(qid_views, f)
+    else:
+        with open(PICKLE_FILE, 'rb') as f:
+            qid_views = pickle.load(f)
+    write_to_database(database, qid_views.items(), start_time, file.name)     
+    return True
 
 def main(argv=None):
     if argv is None:
@@ -235,10 +289,16 @@ def main(argv=None):
     parser.add_argument('-d', '--debug', help='Increases log level to DEBUG')    
     parser.add_argument('files', type=Path, nargs='+', metavar='file')
     parser.add_argument('--database', '--db', help='database name', default=DEFAULT_DATABASE)
+    parser.add_argument("-n", "--max-files", type=int, default=10,
+                        help="Maximum number of files to process")
     logger = logging.getLogger(__name__)
     args = parser.parse_args(argv)
     log_level = logging.DEBUG if args.debug else logging.INFO if args.verbose else logging.WARNING
     logger.setLevel(log_level)
     logger.info(args)
-    for file in arg.files:
-        process_file(file, database)
+    count = 0
+    for file in args.files:
+        if process_file(file, args.database):
+            count += 1
+            if count >= args.max_files:
+                break
