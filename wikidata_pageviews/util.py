@@ -113,10 +113,10 @@ def sum_values(kvs:Iterable[Tuple[str, int]]):
     """
 	results = dict()
 	for k, v in kvs:
-    if k in results:
-        results[k] += v
-    else:
-        results[k] = k
+        if k in results:
+            results[k] += v
+        else:
+            results[k] = k
     return results
 
 def batch_insert(cursor, table:str, data: Iterable[Iterable], columns: Optional[Iterable[str]]=None,
