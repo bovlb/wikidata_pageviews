@@ -1,5 +1,6 @@
 """
-Helper module to convert project name as found in pageview logs into database name as required for ``connect``.
+Helper module to convert project name as found in pageview logs 
+into database name as required for ``connect``.
 
 Example::
     database_from_project('en.m.d')
@@ -55,7 +56,8 @@ def database_from_project_name(project_name:str) -> str:
     
     if len(labels) == 2 and labels[0] in ['www', 'm', 'zero'] and labels[1] in _complete_map:
         result = _complete_map[labels[1]]
-    elif labels[-1] == 'm' and labels[0] in _wikimedia and (len(labels) == 2 or labels[1] in ['m', 'zero']):
+    elif labels[-1] == 'm' and labels[0] in _wikimedia and \
+        (len(labels) == 2 or labels[1] in ['m', 'zero']):
         result = labels[0] + 'wikimedia'
     else:
         prefix = labels[0].replace('-', '_')

@@ -9,10 +9,11 @@ import math
 import argparse
 import sys
 import json
+import gzip
 
 import toolforge
 
-DEFAULT_DATABASE = 's53865__wdpv_p'
+from .constants import *
 
 def datetime_as_mysql(dt):
     """Converts datetime object into MySQL string format"""
@@ -74,7 +75,8 @@ def parse_duration(duration, hour):
         adjusted_value = float(value) * multiplier - 1
         dt_to = datetime.datetime.strptime(hour, "%Y-%m-%d %H:%M:%S")
         assert dt_to is not None
-        logging.getLogger(__name__).info(f"value={value}, multipler={multiplier}, adjusted_value={adjusted_value}")
+        logging.getLogger(__name__).info(f"value={value}, multipler={multiplier}, "
+                                         "adjusted_value={adjusted_value}")
         delta = datetime.timedelta(hours = -adjusted_value)
         dt_from = dt_to + delta
         return datetime_as_mysql(dt_from)
@@ -224,6 +226,7 @@ def get_dump(database=DEFAULT_DATABASE, start=None, end=None, mode=None):
         return result
     
 def parse_args(argv=None):
+    """Wrapper for argparse.ArgumentParser()"""
     if argv is None:
         argv = sys.argv[1:]
     parser = argparse.ArgumentParser()
@@ -246,6 +249,7 @@ def parse_args(argv=None):
 
 
 def main():
+    """Operate from a command-line"""
     args = parse_args()
     result = get_dump(database=args.database, 
                       start=args.start,
@@ -253,3 +257,22 @@ def main():
                       mode=args.mode,
                      )
     json.dump(result, sys.stdout)
+
+def write_combination_file(output, durations=DEFAULT_DURATIONS, database=DEFAULT_DATABASE):
+    """Writes out a single JSON file (compressed)
+    
+    Args:
+        output: Path to write to
+        durations: List of duration strings
+        database: Database to use for report
+    """
+    parts = [ get_dump(database=database, start=duration) for duration in durations ]
+    aggregations = [{k:v for k,v in part.items() if k != 'views'} for part in parts]
+    qids = set.intersection(part.keys() for part in parts)
+    views = {
+        qid: [ part['views'].get(qid, 0) for part in parts ]
+        for qid in qids
+    }
+    result = dict(aggregations=aggregations, views=views)
+    with gzip.open(output, 'wb') as f:
+        json.dump(result, f)

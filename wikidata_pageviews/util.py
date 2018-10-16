@@ -49,6 +49,7 @@ def chunk_and_partition(items, key, chunk_size=None, max_unprocessed=None,
     """        
     
     def check_optional_positive_integer(x, name):
+        """Raise assertion if .x is neither a positive integer nor None"""
         assert x is None or (x > 0 and isinstance(x, int)), f"{name} must be either None or a positive integer"
     
     check_optional_positive_integer(chunk_size, "chunk_size")
@@ -59,6 +60,7 @@ def chunk_and_partition(items, key, chunk_size=None, max_unprocessed=None,
     n_unprocessed = 0 # Total length of lists in cache
     
     def pop_largest():
+        """Removes and returns largest bucket from cache."""
         nonlocal cache, n_unprocessed
         p, ii = max(cache.items(), key=lambda p_ii: len(p_ii[1]))
         del cache[p]
@@ -156,7 +158,7 @@ def batch_insert(cursor, table:str, data: Iterable[Iterable],
     with open(file.name, 'w') as f:
         for row in data:
             escaped_row = (x.translate(escape_table) 
-                           if type(x) == str else str(x)
+                           if isinstance(x, str) else str(x)
                            for x in row)
             print("\t".join(escaped_row), file=f)
     
@@ -171,3 +173,17 @@ def batch_insert(cursor, table:str, data: Iterable[Iterable],
             {columns}
     """).strip()
     result = cursor.execute(sql)
+    return result
+
+
+def iterate_until_n_succeed(f, data, n):
+    """Map a boolean-valued function down an iterable until 
+    the number of True results reaches some threshold,
+    or the iterable ends.
+    """
+    count = 0
+    for d in data:
+        if f(d):
+            count += 1
+            if count == n:
+                return

@@ -7,26 +7,26 @@ Example::
 import gzip
 #from collections import defaultdict, Counter
 from typing import NamedTuple
-import os
+#import os
 import re
 import sys
 from textwrap import dedent
 import logging
-import itertools
+#import itertools
 import io
 import time
-import logging
 import argparse
 from pathlib import Path
-from .util import *
-from .project import database_from_project_name
-import pickle
-from tenacity import retry, wait_random_exponential
+from datetime import datetime, timedelta
 
+from tenacity import retry, wait_random_exponential
 import toolforge
 
-DEFAULT_DATABASE = 's53865__wdpv_p'
-PICKLE_FILE = '/tmp/wdpv.pickle'
+from .util import *
+from .constants import *
+from .project import database_from_project_name
+
+FILE_RE = re.compile(r'^pageviews-\d{8}--d{6}\.gz$')
 
 def connect_to_database(dbname, **kargs):
     """Convenience wrapper for ``toolforge.connect`` that handles credentials.
@@ -45,7 +45,7 @@ def connect_to_database(dbname, **kargs):
                              #host=os.environ['MYSQL_HOST'],
                              #user=os.environ['MYSQL_USERNAME'],
                              #password=os.environ['MYSQL_PASSWORD'],
-                            **kargs)
+                             **kargs)
     return conn
     
 
@@ -87,7 +87,8 @@ def convert_titles_to_qids(dbname, titles):
 
         for title, qid in cursor:
             title = title.decode()
-            # I don't know why, but there's a handful of items that have a lower-case "q".  Probably historical.
+            # I don't know why, but there's a handful of items that have a lower-case "q".  
+            # Probably historical.
             # To reduce memory overhead, we convert QIDs into integers.
             qid = int(qid.decode().upper()[1:])
             if title not in titles:
@@ -182,8 +183,9 @@ def process_log_entries(log_entries):
         titles = (le.title for le in log_entries)
         if dbname == 'wikidatawiki':
             qids = [ int(title[1:]) 
-                       if title.startswith("Q") else None for title in titles ]
-            logger.info(f"Wikidata special case: {len(log_entries)} converted to {sum(qid is not None for qid in qids)}")
+                    if title.startswith("Q") else None for title in titles ]
+            logger.info(f"Wikidata special case: {len(log_entries)} "
+                        "converted to {sum(qid is not None for qid in qids)}")
         else:
             qids = convert_titles_to_qids(dbname, titles)
             
@@ -270,35 +272,77 @@ def process_file(file, database=DEFAULT_DATABASE):
         return False
     start_time = time.time()
     log_entries = read_log(file)
-    if True:
-        qid_views = process_log_entries(log_entries)
-        qid_views = sum_values(qid_views)
-        with open(PICKLE_FILE, 'wb') as f:
-            pickle.dump(qid_views, f)
-    else:
-        with open(PICKLE_FILE, 'rb') as f:
-            qid_views = pickle.load(f)
+    qid_views = process_log_entries(log_entries)
+    qid_views = sum_values(qid_views)
     write_to_database(database, qid_views.items(), start_time, file.name)     
     return True
 
-def main(argv=None):
+def parse_args(argv=None):
     if argv is None:
         argv = sys.argv[1:]
     parser = argparse.ArgumentParser()
-    parser.add_argument('-v', '--verbose', help='Increases log level to INFO')
-    parser.add_argument('-d', '--debug', help='Increases log level to DEBUG')    
-    parser.add_argument('files', type=Path, nargs='+', metavar='file')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Increases log level to INFO')
+    parser.add_argument('-d', '--debug', action='store_true', help='Increases log level to DEBUG')    
+    parser.add_argument('dir', type=Path, default=DEFAULT_DIR)
     parser.add_argument('--database', '--db', help='database name', default=DEFAULT_DATABASE)
     parser.add_argument("-n", "--max-files", type=int, default=10,
                         help="Maximum number of files to process")
+    parser.add_argument("--maxdays", type=int, default=7, help="Maximum age of file to process in days")
     logger = logging.getLogger(__name__)
     args = parser.parse_args(argv)
     log_level = logging.DEBUG if args.debug else logging.INFO if args.verbose else logging.WARNING
     logger.setLevel(log_level)
-    logger.info(args)
-    count = 0
-    for file in args.files:
-        if process_file(file, args.database):
-            count += 1
-            if count >= args.max_files:
-                break
+    logger.info(argv)
+    logger.info(args)    
+    
+
+def get_earliest_file(dir, max_days):
+    """It's expensive to traverse the entire directory structure, 
+    so we short-circuit any directories or files that cannot be recent.
+    
+    Args:
+        dir: Base directory to traverse from.  
+        max_days: Number of days to go back
+        
+    Returns:
+        file: Path to predicted earliest file (may not exist)
+    """
+    now = datetime.now()
+    delta = timedelta(days=max_days)
+    dt = now - delta
+    file = dir / dt.strftime('%Y') / dt.strftime('%Y-%m') / dt.strftime('pageviews-%Y%m%d-%H%M%S.gz')
+    logging.getLogger(__name__).info(f"earliest file: {file}")
+    return file
+    
+
+def get_files(dir, max_days):
+    """Smart traverse of directory structure using earliest file as cutoff.
+    
+    Args:
+        dir: Directory to traverse
+        max_days: Maximum number of days to go back before now.
+        
+    Returns:
+        files: Paths from most recent backwards
+    """
+    def gen(dir):
+        """Helper function to recurse of directories"""
+        for path in dir.iterdir():
+            if path.is_dir():
+                if str(path) >= str(earliest_file)[:len(tr(path))]:
+                    yield from get_files(path, earliest_file)
+            else:
+                if str(path) >= str(earliest_file) and FILE_RE.search(path.name):
+                    yield path
+
+    earliest_file = get_earliest_file(dir, max_days)
+    files = sorted(gen(args.dir), reverse=True)   
+    return files
+
+    
+def main(argv=None):
+    args = parse_args(argv)
+    assert args.dir.is_dir()
+    files = get_files(args.dir, args.max_days)
+    iterate_until_n_succeed(lambda file: process_file(file, args.database), 
+                            files, args.max_files)
