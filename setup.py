@@ -11,7 +11,8 @@ setup(name='wikidata_pageviews',
       zip_safe=False,
       entry_points = {
           'console_scripts': [
-              'wdpv-process-file=wikidata_pageviews.process_log:main'
+              'wdpv-process-file=wikidata_pageviews.process_log:main',
+              'wdpv-dump=wikidata_pageviews.dump:main',
           ],
       }
 )
