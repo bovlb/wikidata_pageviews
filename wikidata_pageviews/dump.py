@@ -14,6 +14,11 @@ import toolforge
 
 DEFAULT_DATABASE = 's53865__wdpv_p'
 
+def datetime_as_mysql(dt):
+    """Converts datetime object into MySQL string format"""
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def latest_available_hour(cursor):
     """Returns the last available hour in the database"""
     sql = dedent(f"""
@@ -21,7 +26,7 @@ def latest_available_hour(cursor):
     """)
     cursor.execute(sql)
     (hour,) = cursor.fetchone()
-    return hour
+    return datetime_as_mysql(hour)
     
 HOUR_RE = re.compile(r'^(\d\d\d\d-\d\d-\d\d)T(\d\d)$')
 
@@ -37,7 +42,7 @@ def parse_hour(hour):
     m = HOUR_RE.search(hour)
     if m:
         return f"$1 $2:00:00"
-    logging.getLogger(__name__).warning(f"parse_hour: Could not parse: {hour}")
+    logging.getLogger(__name__).info(f"parse_hour: Could not parse: {hour}")
     return None
 
 DURATION_UNITS = {
@@ -64,15 +69,15 @@ def parse_duration(duration, hour):
     """
     m = DURATION_RE.search(duration)
     if m:
-        value = m.groups(1)
-        unit = m.groups(2)
+        (value, unit) = m.groups()
         multiplier = DURATION_UNITS[unit]
-        adjusted_value = value * multiplier - 1
-        dt_to = datetime.strptime(hiyr, "%Y-%m-%d %H:%M:%S")
+        adjusted_value = float(value) * multiplier - 1
+        dt_to = datetime.datetime.strptime(hour, "%Y-%m-%d %H:%M:%S")
         assert dt_to is not None
+        logging.getLogger(__name__).info(f"value={value}, multipler={multiplier}, adjusted_value={adjusted_value}")
         delta = datetime.timedelta(hours = -adjusted_value)
-        dt_from = dt_to - delta
-        return dt_from.strftime("%Y-%m-%d %H:%M:%S")
+        dt_from = dt_to + delta
+        return datetime_as_mysql(dt_from)
     logging.getLogger(__name__).warning(f"parse_duration: Could not parse: {duration}")
     return None
 
@@ -118,10 +123,11 @@ def get_hours(cursor, start, end):
     """
     sql = dedent(f"""
         SELECT hour FROM hours
-        WHILE hour >= "{start}" AND hour <= "{end}";
+        WHERE hour >= '{start}' AND hour <= '{end}';
     """)
+    logging.getLogger(__name__).debug(sql)
     cursor.execute(sql)
-    return [ hour for (hour,) in cursor.fetchall() ]
+    return [ datetime_as_mysql(hour) for (hour,) in cursor.fetchall() ]
 
 
 def aggregate_by_qid(cursor, start, end):
@@ -142,11 +148,12 @@ def aggregate_by_qid(cursor, start, end):
         AND hour <= "{end}"
         GROUP BY qid;
     """)
+    logging.getLogger(__name__).debug(sql)
     cursor.execute(sql)
     for qid, views in cursor:
         # We store unaligned views against the magic value 0
         if qid != 0:
-            yield ("Q" + str(qid), views)
+            yield ("Q" + str(qid), int(views))
         
 
 def get_summary(cursor, start, end):
@@ -168,9 +175,10 @@ def get_summary(cursor, start, end):
         WHERE hour >= "{start}"
         AND hour <= "{end}";
     """)
+    logging.getLogger(__name__).debug(sql)
     cursor.execute(sql)
     (max_qid, views) = cursor.fetchone()
-    return (max_qid, views)
+    return (int(max_qid), float(views))
 
         
 def get_dump(database=DEFAULT_DATABASE, start=None, end=None, mode=None):
@@ -186,7 +194,7 @@ def get_dump(database=DEFAULT_DATABASE, start=None, end=None, mode=None):
     """
     logger = logging.getLogger(__name__)
     with toolforge.connect(database, cluster="tools") as cursor:
-        (start, end) = convert_start_and_end(cursor, start_and_end)    
+        (start, end) = convert_start_and_end(cursor, start, end)    
         logger.info(f"start={start}, end={end}")
         hours = get_hours(cursor, start, end)
         logger.info(f"{len(hours)} hours")
@@ -219,8 +227,10 @@ def parse_args(argv=None):
     if argv is None:
         argv = sys.argv[1:]
     parser = argparse.ArgumentParser()
-    parser.add_argument('-v', '--verbose', help='Increases log level to INFO')
-    parser.add_argument('-d', '--debug', help='Increases log level to DEBUG')    
+    parser.add_argument('-v', '--verbose', action='store_true', 
+                        help='Increases log level to INFO')
+    parser.add_argument('-d', '--debug', action='store_true', 
+                        help='Increases log level to DEBUG')    
     parser.add_argument('--database', '--db', help='database name', default=DEFAULT_DATABASE)
     parser.add_argument('--start', help='Start time, e.g. 2018-10-10T17 or 1d')
     parser.add_argument('--end', help="End time, e.g. 2018-10-10T17")
@@ -228,8 +238,12 @@ def parse_args(argv=None):
     logger = logging.getLogger(__name__)
     args = parser.parse_args(argv)
     log_level = logging.DEBUG if args.debug else logging.INFO if args.verbose else logging.WARNING
+    logging.basicConfig()
     logger.setLevel(log_level)
+    logger.info(argv)
     logger.info(args)
+    return args
+
 
 def main():
     args = parse_args()
@@ -238,4 +252,4 @@ def main():
                       end=args.end,
                       mode=args.mode,
                      )
-    json.dump(sys.stdout, result)
+    json.dump(result, sys.stdout)
