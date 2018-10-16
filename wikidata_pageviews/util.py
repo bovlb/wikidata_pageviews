@@ -186,4 +186,5 @@ def iterate_until_n_succeed(f, data, n):
         if f(d):
             count += 1
             if count == n:
-                return
+                break
+    return count
