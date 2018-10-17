@@ -36,8 +36,9 @@ def parse_args(argv=None):
 def main(argv=None):
     """Console script entry point"""
     args = parse_args(argv)
-    files = get_files(args.dir, args.max_days)
-    n = iterate_until_n_succeed(lambda file: process_file(file, args.database), 
-                                files, args.max_files)
-    if n > 0:
+    files = get_files(args.dir, args.maxdays)
+    if args.max_files > 0:
+        n = iterate_until_n_succeed(lambda file: process_file(file, args.database), 
+                                    files, args.max_files)
+    if args.max_files == 0 or n > 0:
         write_combination_file(output=args.output, database=args.database)

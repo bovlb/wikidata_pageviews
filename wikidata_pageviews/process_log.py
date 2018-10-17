@@ -329,20 +329,20 @@ def get_files(dir, max_days):
         """Helper function to recurse of directories"""
         for path in dir.iterdir():
             if path.is_dir():
-                if str(path) >= str(earliest_file)[:len(tr(path))]:
-                    yield from get_files(path, earliest_file)
+                if str(path) >= str(earliest_file)[:len(str(path))]:
+                    yield from gen(path)
             else:
                 if str(path) >= str(earliest_file) and FILE_RE.search(path.name):
                     yield path
 
     earliest_file = get_earliest_file(dir, max_days)
-    files = sorted(gen(args.dir), reverse=True)   
+    files = sorted(gen(dir), reverse=True)   
     return files
 
     
 def main(argv=None):
     args = parse_args(argv)
     assert args.dir.is_dir()
-    files = get_files(args.dir, args.max_days)
+    files = get_files(args.dir, args.maxdays)
     iterate_until_n_succeed(lambda file: process_file(file, args.database), 
                             files, args.max_files)
