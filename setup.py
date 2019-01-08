@@ -13,7 +13,8 @@ setup(name='wikidata_pageviews',
           'console_scripts': [
               'wdpv-process-file=wikidata_pageviews.process_log:main',
               'wdpv-dump=wikidata_pageviews.dump:main',
-              'wdpv-process-and-dump=wikidata_pageviews:main'
+              'wdpv-process-and-dump=wikidata_pageviews:main',
+              'wdpv-grid-monitor=wikidata_pageviews.grid:monitor',
           ],
       }
 )

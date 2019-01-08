@@ -140,7 +140,7 @@ def aggregate_by_qid(cursor, start, end):
         start: Hour like "2018-10-10 01:00:00"
         end: Hour like "2018-10-10 01:00:00"
     Yields:
-        qid: String like "Q42"
+        qid: Integer like 42 for "Q42"
         views: Number of page views
     """
     sql = dedent(f"""
@@ -155,7 +155,7 @@ def aggregate_by_qid(cursor, start, end):
     for qid, views in cursor:
         # We store unaligned views against the magic value 0
         if qid != 0:
-            yield ("Q" + str(qid), int(views))
+            yield (qid, int(views))
         
 
 def get_summary(cursor, start, end):
@@ -201,29 +201,16 @@ def get_dump(database=DEFAULT_DATABASE, start=None, end=None, mode=None):
         hours = get_hours(cursor, start, end)
         logger.info(f"{len(hours)} hours")
         (max_qid, total_views) = get_summary(cursor, start, end)
-        result = dict(
+        summary = dict(
             start=start,
             end=end,
             hours=hours,
             max_qid=max_qid,
             total_views=total_views,
         )
-        data = aggregate_by_qid(cursor, start, end)
-        if mode is None or mode == 'views':
-            result['views'] = dict(data)
-        elif mode == 'logprobs':
-            # We're applying Laplace smoothing here, using the maximum QID number 
-            # as an estimate of the total number of QIDs.
-            log_denominator = math.log(total_views + max_qid)
-            result['logprobs'] = {
-                qid: math.log(views+1) - log_denominator
-                for qid, views in data
-            }
-            result['default_logprob'] = math.log(1) - log_denominator
-        else:
-            assert False, f"Unknown mode {mode}"
+        data = list(aggregate_by_qid(cursor, start, end))
             
-        return result
+        return (summary, data)
     
 def parse_args(argv=None):
     """Wrapper for argparse.ArgumentParser()"""
@@ -251,11 +238,13 @@ def parse_args(argv=None):
 def main():
     """Operate from a command-line"""
     args = parse_args()
-    result = get_dump(database=args.database, 
-                      start=args.start,
-                      end=args.end,
-                      mode=args.mode,
-                     )
+    summary, data = get_dump(database=args.database, 
+                             start=args.start,
+                             end=args.end,
+                             mode=args.mode,
+                            )
+    result = summary
+    result['views'] = { "Q" + str(qid):views for qid, views in data }
     json.dump(result, sys.stdout)
 
 def write_combination_file(output, durations=DEFAULT_DURATIONS, database=DEFAULT_DATABASE):
@@ -267,10 +256,10 @@ def write_combination_file(output, durations=DEFAULT_DURATIONS, database=DEFAULT
         database: Database to use for report
     """
     parts = [ get_dump(database=database, start=duration) for duration in durations ]
-    aggregations = [{k:v for k,v in part.items() if k != 'views'} for part in parts]
-    qids = set.intersection(part.keys() for part in parts)
+    aggregations = [ summary for summary, data in parts]
+    qids = set.intersection(data.keys() for summary, data in parts)
     views = {
-        qid: [ part['views'].get(qid, 0) for part in parts ]
+        "Q" + str(qid): [ part['views'].get(qid, 0) for part in parts ]
         for qid in qids
     }
     result = dict(aggregations=aggregations, views=views)

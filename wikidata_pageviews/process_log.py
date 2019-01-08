@@ -26,7 +26,8 @@ from .util import *
 from .constants import *
 from .project import database_from_project_name
 
-FILE_RE = re.compile(r'^pageviews-\d{8}--d{6}\.gz$')
+# E.g. pageviews-20181021-120000.gz
+FILE_RE = re.compile(r'^pageviews-\d{8}-\d{6}\.gz$')
 
 def connect_to_database(dbname, **kargs):
     """Convenience wrapper for ``toolforge.connect`` that handles credentials.
@@ -145,7 +146,8 @@ def convert_titles_to_qids(dbname, titles):
                 n_redirect += get_results_redirect(cursor, chunk)
 
     logger.info(f"convert_titles_to_qids: converted {len(titles)} titles into {len(results)} QIDs "
-                f"({n_direct} direct and {n_redirect} redirect)")
+                f"({n_direct} direct and {n_redirect} redirect) "
+                f"for database {dbname}") 
 
     return [ results.get(title) for title in titles ]
     
@@ -165,6 +167,8 @@ def read_log(file):
         for line in f.readlines():
             project, title, views, _ = line.decode().split(' ')
             yield LogEntry(project, title, int(views))
+
+QID_RE = re.compile(r'^Q(\d+)$')
             
 def process_log_entries(log_entries):
     """Process log entries into (qid,views) pairs.
@@ -183,7 +187,7 @@ def process_log_entries(log_entries):
         titles = (le.title for le in log_entries)
         if dbname == 'wikidatawiki':
             qids = [ int(title[1:]) 
-                    if title.startswith("Q") else None for title in titles ]
+                    if QID_RE.search(title) else None for title in titles ]
             logger.info(f"Wikidata special case: {len(log_entries)} "
                         "converted to {sum(qid is not None for qid in qids)}")
         else:
@@ -275,6 +279,7 @@ def process_file(file, database=DEFAULT_DATABASE):
     qid_views = process_log_entries(log_entries)
     qid_views = sum_values(qid_views)
     write_to_database(database, qid_views.items(), start_time, file.name)     
+    logger.info(f"File {file} done with {len(qid_views)} QIDs") 
     return True
 
 def parse_args(argv=None):
@@ -327,16 +332,27 @@ def get_files(dir, max_days):
     """
     def gen(dir):
         """Helper function to recurse of directories"""
+        logger.info(f"Processing directory {dir}")
         for path in dir.iterdir():
             if path.is_dir():
+                #logger.info(f"Considering directory {path}")
                 if str(path) >= str(earliest_file)[:len(str(path))]:
                     yield from gen(path)
             else:
-                if str(path) >= str(earliest_file) and FILE_RE.search(path.name):
-                    yield path
+                #logger.info(f"Considering file {path}")
+                if str(path) >= str(earliest_file):
+                    if FILE_RE.search(path.name):
+                        #logger.info(f"Adding file {path}") 
+                        yield path
+                    #else:
+                        #logger.warning(f"Path {path.name} does not match template")
+                #else:
+                    #logger.info(f"File {path} is older than {earliest_file}")
 
+    logger = logging.getLogger(__name__)
     earliest_file = get_earliest_file(dir, max_days)
     files = sorted(gen(dir), reverse=True)   
+    logger.info(f"Going to process {len(files)} files: {files}")
     return files
 
     
